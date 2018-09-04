@@ -1,0 +1,144 @@
+# The following instructions work on Titan, Summitdev, Peak and Summit
+
+cd ~
+cp -r $WORLDWORK/stf010/brendel/materials .
+
+cd heat
+
+# Replace <projid> in submit.sh with your project id (e.g. stf010 or trn001)
+
+# Load GCC and Score-P
+source ./prepare-environment.sh
+
+module li
+
+# Build all versions of the code
+make
+
+# Familiarize yourself with ./submit.sh
+#   It creates a job script and submits it.
+#   The job scripts are different depending on which machine you are logged into.
+#
+#  On Titan, among other things, it automatically copies the necessary files to
+#  $MEMBERWORK/<projid>/scratch/$USER/heat/*-<jobid>/
+#  and will also copy back results into your working directory after job completion.
+#  This is not necessary on Summit(dev) as $HOME is accessible from compute nodes.
+
+# Execute normally 2 processes x 2 threads
+./submit.sh bin/heat-c-mpi-omp
+
+watch qstat -u $USER # Titan
+watch bjobs          # Summit(dev)
+
+# --- Profiling ------------------------------------------------
+
+# Execute the binary built with Score-P
+./submit.sh bin-scorep/heat-c-mpi-omp
+watch qstat -u $USER # titan
+watch bjobs          # Summit(dev)
+
+mv scorep-2* scorep-1-profile # Rename experiment directory for better readability
+
+cube scorep-1-profile/profile.cubex # Cube doesn't exist on Summit(dev)! Execute this on e.g. Titan (module switch PrgEnv-pgi PrgEnv-gnu; module load scorep; cube ...)
+
+# --- Tracing --------------------------------------------------
+
+scorep-score scorep-1-profile/profile.cubex
+# 700MB estimate
+
+# Show all regions, not only groups
+scorep-score -r scorep-1-profile/profile.cubex
+
+# Notice that heatInitFunc gets called a lot lot
+
+# Familiarize yourself with the prepared filter file
+cat scorep.filter
+
+# Estimate how using this filter will change the tracefile size
+scorep-score -f scorep.filter scorep-1-profile/profile.cubex
+
+# Uncomment the following export lines in ./submit.sh .
+# Mind that there are two sets of export commands. One for Titan and one for Summit(dev)
+#   export SCOREP_ENABLE_TRACING=yes
+#   export SCOREP_TOTAL_MEMORY=300M
+#   export SCOREP_FILTERING_FILE=scorep.filter
+
+# Execute again. This time tracing.
+./submit.sh bin-scorep/heat-c-mpi-omp
+watch qstat -u $USER # titan
+watch bjobs          # Summit(dev)
+
+mv scorep-2* scorep-2-trace
+
+module load vampir
+
+# --- Vampir via X-Forwarding ----------------------------------
+
+vampir scorep-2-trace/traces.otf2
+
+# --- Vampir Server + Client -----------------------------------
+
+# Titan only! Because SSH-Forwarding doesn't work to Summit(dev).
+
+# Install Vampir locally
+#   https://www.olcf.ornl.gov/software_package/vampir/ -> Support -> "Install Vampir Locally"
+#   Make sure to use the Vampir remote license
+# Or at ANL
+#   https://www.alcf.anl.gov/vampir -> "Setting up the Vampir GUI client" and following sections
+
+vampirserver start -- -A <projid> -q debug
+
+# Follow its instructions
+
+# Execute Vampir locally.
+# Connect to the server running on a compute node of Titan.
+
+# Running jobs don't have access to $HOME
+# , therefore open /lustre/atlas1/<projid>/scratch/$USER/heat/*-<jobid>/scorep-*/traces.otf2
+# (submit.sh takes care of copying files between home and and the scratch file system)
+
+
+vampirserver stop
+
+# Double check that it's really closed
+watch qstat -u $USER # titan
+watch bjobs          # Summit(dev)
+
+# --- Things to do ---------------------------------------------
+
+# ------ Compare View ------------------------------------------
+
+# Maybe replace "debug" with "batch" queue in ./submit.sh so you can submit all jobs at once
+./submit.sh bin-scorep/heat-c
+./submit.sh bin-scorep/heat-c-mpi
+./submit.sh bin-scorep/heat-c-omp
+./submit.sh bin-scorep/heat-c-mpi-omp
+
+# Open all four traces
+vampir scorep-2*/traces.otf2
+
+# File -> New Comparison Session -> OK
+
+# Look at all four traces together.
+# Align/shift timelines by holding Ctrl and dragging the timeline left and right
+
+# ------ Performance Counters -------------------------------------
+
+module load papi
+
+papi_avail
+
+papi_avail | grep FP  # float point things
+papi_avail | grep TCM # total cache misses
+
+# More performance counters
+papi_native_avail | less   # Look for Yes/No in the availability column
+
+# Uncomment / change export line in ./submit.sh
+#   export SCOREP_METRIC_PAPI=SCOREP_METRIC_PAPI=PAPI_TOT_INS,PAPI_TOT_CYC
+
+# In Vampir use the Counter Timeline or Performance Radar to investigate
+# what the counters do.
+
+# You can change the color scale.
+# Use right click for the settings menu
